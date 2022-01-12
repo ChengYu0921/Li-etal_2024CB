@@ -1,0 +1,155 @@
+```{r}
+setwd("G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12")
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+# Load the cichlid OE dataset
+burtoni_OE.data <- Read10X(data.dir = "G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12")
+# Initialize the Seurat object with the raw (non-normalized data).
+burtoni_OE <- CreateSeuratObject(counts = burtoni_OE.data, project = "burtoni_2trt_2ctrl", min.cells = 3, min.features = 200)
+# check the data for mitochondrial content ~ dying cells
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+burtoni_OE[["percent.mt"]] <- PercentageFeatureSet(burtoni_OE, pattern = "^ACI43-")
+#Now you can see "percent.mt" in burtoni_OE metadata
+
+# Visualize QC metrics as a violin plot
+VlnPlot(burtoni_OE, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+plot1 <- FeatureScatter(burtoni_OE, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2a <- FeatureScatter(burtoni_OE, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3a <- FeatureScatter(burtoni_OE, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+plot1
+plot2a
+plot3a
+
+counts=(burtoni_OE@meta.data[["nCount_RNA"]])
+quantile(counts, prob=c(0.05,0.25,0.5,0.75,0.95,1))
+features=(burtoni_OE@meta.data[["nFeature_RNA"]])
+mitochondria=(burtoni_OE@meta.data[["percent.mt"]])
+quantile(features, prob=c(0.05,0.25,0.5,0.75,0.95,1))
+quantile(mitochondria, prob=c(0.05,0.25,0.5,0.75,0.95,1))
+hist(counts, xlab = "UMIs per barcode", breaks = 50, main = NULL )
+hist(features, xlab= "Features per barcode", breaks = 20, main = NULL)
+hist(mitochondria, xlab = "% mitochondrial contamination", main= NULL)
+
+metadata= burtoni_OE@meta.data
+metadata %>%
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=NULL) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+    geom_hline(yintercept =400) +
+  	geom_vline(xintercept =540) 
+  	
+
+#Filter cells with >20% mitochondrial counts
+min_feature<-0
+max_feature<-6000
+mt_percent<-20
+burtoni_OE <- subset(burtoni_OE, subset = nFeature_RNA > min_feature & nFeature_RNA < max_feature & percent.mt <mt_percent) 
+#log normalize the data and scale to 10,000
+burtoni_OE <- NormalizeData(burtoni_OE, normalization.method = "LogNormalize", scale.factor = 10000)
+# next identify 2000 differentially expressed features (genes) that distinguish different cell types
+# and can be used for PC analyses
+burtoni_OE <- FindVariableFeatures(burtoni_OE, selection.method = "vst", nfeatures = 2000)
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(burtoni_OE), 10)
+#plot variable features with and without labels
+plot1 <- VariableFeaturePlot(burtoni_OE)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 
+plot2
+
+
+# Shift data so mean expression across cells is 0
+# Scale each gene so variance across cells is 1. This prevents high express genes from dominating
+# results in burtoni_OE[["RNA"]]@scale.data
+all.genes <- rownames(burtoni_OE)
+burtoni_OE <- ScaleData(burtoni_OE, features = all.genes)
+#perform PCA on data
+burtoni_OE <- RunPCA(burtoni_OE, features = VariableFeatures(object = burtoni_OE))
+
+# Examine and visualize PCA results: 
+# a. show positive and negative loadings on each pc axis for 5 PC axes
+#print(burtoni_OE[["pca"]], dims = 1:5, nfeatures = 5) 
+# b. show loadings of top genes on two of PC axes - this seems to only show positive loadings
+#VizDimLoadings(burtoni_OE, dims = 1:2, reduction = "pca")
+# c. plot data in pc1 & 2 space
+#DimPlot(burtoni_OE, reduction = "pca")
+# d. show data as heatmap with 1 or more dimensions
+#  - this can be used to determine how many PC's are informative
+#DimHeatmap(burtoni_OE, dims = 1:12, cells = 500, balanced = TRUE)
+# e. An alternative to determining # of PC's is to use Jackstraws
+# NOTE: This process can take a long time for big datasets, comment out for expediency.
+# More approximate techniques such as those implemented in ElbowPlot() can be 
+# used to reduce computation time
+
+#Determine PC cutoff 
+ElbowPlot(burtoni_OE, ndims=50)
+# Seurat suggests the PC cutoff should be the smaller PC value of 2 calculated metrics: (1) The PC at which cumulative % variation > 90% and the % variation associated with the PC is less than 5%. (2) The last PC where change of % variation is more than 0.1%. Calculate both metrics and pick the smaller PC as the cut off:
+
+# Determine percent of variation associated with each PC
+pct <- burtoni_OE[["pca"]]@stdev / sum(burtoni_OE[["pca"]]@stdev) * 100
+pct
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+cumu
+co1
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+#take the smallest of the 2 calculated metrics
+pcs <- min(co1, co2)
+pcs
+#Cut off at 16 PCs?
+# Create a dataframe with values
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+write.csv(plot_df,"G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12/variation_PCs.csv")
+
+dim_clusters<-20
+res_clusters<-0.5
+
+burtoni_OE <- FindNeighbors(burtoni_OE, dims = 1:dim_clusters)
+burtoni_OE <- FindClusters(burtoni_OE, resolution = res_clusters)
+# Look at cluster IDs of the first 5 cells
+head(Idents(burtoni_OE), 5)
+
+# run UMAP
+burtoni_OE <- RunUMAP(burtoni_OE, dims = 1:dim_clusters)
+# note that you can set `label = TRUE` or use the LabelClusters function to help label
+# individual clusters
+#burtoni_OE <- RenameIdents(object = burtoni_OE, "0" = "ciliated OSNs", "1" = "?", "2" = "microvillous OSNs", "3" = "blood/damaged cells?", "4" = "immune-like", "5"="odorant binding proteins","6"="ciliary support cells","7"="developing OSNs","8"="mucus-secreting","9"="dying cells","10"="mitotic cells", "11"="mitotic cells","12"="multiplets?","13"= "mucus secreting cells","14"="immune-like", "15"="blood")
+#Rename the clusters
+
+DimPlot(burtoni_OE, reduction = "umap", label = TRUE, label.size = 3)
+FeaturePlot(object=burtoni_OE, features = "percent.mt", label=TRUE)
+
+all_markers_20PCs = FindAllMarkers(burtoni_OE)
+#Find all marker genes in all clusters and save file.This part takes a while to compute. Takes longer with more PCs.
+
+write.csv(all_markers_20PCs, "G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12/all_markers.csv", quote = F)
+
+#Return top 10 markers for cluster specified 'x'
+gen_marker_table <- function(x){
+  all_markers_20PCs[all_markers_20PCs$cluster ==x, ] %>%
+  head(n=10)
+}
+top10_markers_20PCs <- map_dfr(0:15, gen_marker_table)
+# Create a data frame of results for clusters 0-15 and save file
+
+View(top10_markers_20PCs)
+write.csv(top10_markers_20PCs, "G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12/top10_markers_20PCs.csv", quote = F)
+```
