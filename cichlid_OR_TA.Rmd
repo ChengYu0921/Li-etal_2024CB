@@ -1,0 +1,367 @@
+---
+title: "Cichlid OR sc-Seq"
+author: "Theresa Alexander reesyxan@umd.edu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    number_sections: true
+    self_contained: true
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+  rmdformats::readthedown:
+    code_download: true
+    code_folding: show
+    df_print: paged
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    width: 300
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+  BiocStyle::html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+---
+<style type="text/css">
+body, td {
+  font-size: 16px;
+}
+code.r{
+  font-size: 16px;
+}
+pre {
+ font-size: 16px
+}
+</style>
+
+
+# Setup 
+```{r, message = FALSE}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+```
+
+Info for use if needed:
+
+Fish Clade annotation info
+  https://useast.ensembl.org/info/genome/genebuild/2018_12_fish_clade_gene_annotation.pdf
+  
+  <br>
+  
+# Data
+
+```{r}
+# Load the cichlid OE dataset
+juntti.data <- Read10X(data.dir = "../data/.")
+
+# Initialize the Seurat object
+juntti_OE <- CreateSeuratObject(counts = juntti.data, project = "juntti_2trt_2ctrl", 
+                                 min.cells = 3, min.features = 200)
+```
+
+<br><br>
+
+Question: ACI43... do all annotated cichlid mitochondrial genes start with this ID? These are usually prefixed with a "MT", but I poked around the gtf file and there are no MT genes. Just want to double check on this. The reason I ask is in the feature plot below, we see an extremely high amount of cells with high mitochondrial percentages, meaning either this isn't the appropriate tag for them or we have an extremely high number of cells which are dead/dying.
+
+<br>
+```{r}
+# check the data for mitochondrial content ~ dying cells
+juntti_OE[["percent.mt"]] <- PercentageFeatureSet(juntti_OE, pattern = "^ACI43-")
+#juntti_OE[["percent.mt"]] <- PercentageFeatureSet(juntti_OE, pattern = "^mt-")
+#Now you can see "percent.mt" in burtoni_OE metadata
+```
+
+
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(juntti_OE, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+<br>
+We usually filter for cells which have MT percent <5%, so we would filter a good portion of them...
+```{r, echo = FALSE}
+message("We usually filter for cells which have MT percent <5%, so we would filter ", round(sum(juntti_OE[["percent.mt"]] > 5)/ nrow(juntti_OE[["percent.mt"]]) * 100, 2), "% of the cells.")
+```
+
+
+
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+plot1 <- FeatureScatter(juntti_OE, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2a <- FeatureScatter(juntti_OE, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot3a <- FeatureScatter(juntti_OE, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+plot1
+plot2a
+plot3a
+
+```
+
+## Filter Cells
+<br>
+
+In your current analysis, you filter cells for >20% mitochondrial genes, this seems really high. 
+\textcolor{red}{I just want to confirm there isn't a specific reason that in these cell types we would expect a higher-than-usual mitochondrial gene expression. You also set the max features really high at 6000 for the max cutoff. Is there a specific reason for this curoff as well?}
+<br>
+```{r}
+#Filter cells with >20% mitochondrial counts, max features > 6000 
+#min_feature<-0
+#max_feature<-6000
+#mt_percent<-20
+juntti_OE <- subset(juntti_OE, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+
+
+# Normalize and Highly Variable Genes
+
+```{r, message = FALSE}
+juntti_OE <- NormalizeData(juntti_OE, normalization.method = "LogNormalize", scale.factor = 10000)
+
+juntti_OE <- FindVariableFeatures(juntti_OE, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(juntti_OE), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(juntti_OE)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+```
+<br>
+Strange that the top 10 are are "LOC" genes? Let's look at the list of the top 50 to see if it's any different after 10.
+
+```{r}
+all.genes <- rownames(juntti_OE)
+top50 <- head(VariableFeatures(juntti_OE), 50)
+top50 <- data.frame(matrix(top50, ncol = 5))
+colnames(top50) <- paste("top", seq(1,49, by = 10), "-", seq(10,50, by = 10))
+top50
+
+message("Note: This might be fine. Looks like ", round(sum(grepl("LOC", all.genes))/length(all.genes) * 100, 2), "% of genes are 'LOC' genes")
+```
+<br>
+
+Entry from ensembl:
+
+Symbols beginning with LOC: When a published symbol is not available, and orthologs have not yet been determined, Gene will provide a symbol that is constructed as 'LOC' + the GeneID. 
+(https://www.ncbi.nlm.nih.gov/books/NBK3840/)
+
+<br>
+So our top variable genes without a published symbol and don't have an annotated ortholog.
+<br>
+<br>
+
+```{r}
+juntti_OE <- ScaleData(juntti_OE, features = all.genes)
+```
+
+
+# PCA
+
+```{r}
+juntti_OE <- RunPCA(juntti_OE, features = VariableFeatures(object = juntti_OE))
+```
+
+```{r}
+print(juntti_OE[["pca"]], dims = 1:5, nfeatures = 5)
+DimPlot(juntti_OE, reduction = "pca")
+```
+
+```{r, eval=FALSE, echo=FALSE}
+DimHeatmap(juntti_OE, dims = 1:10, cells = 500, balanced = TRUE)
+
+message("Seems like most discriminatory information is in the top 6-7 PCs.")
+
+juntti_OE <- JackStraw(juntti_OE, num.replicate = 100)
+juntti_OE <- ScoreJackStraw(juntti_OE, dims = 1:20)
+JackStrawPlot(juntti_OE, dims = 1:15)
+ElbowPlot(juntti_OE)
+```
+
+
+```{r}
+juntti_OE <- FindNeighbors(juntti_OE, dims = 1:10)
+juntti_OE <- FindClusters(juntti_OE, resolution = 0.5)
+```
+
+
+# UMAP/tSNE
+
+```{r}
+juntti_OE <- RunUMAP(juntti_OE, dims = 1:10)
+juntti_OE <- RunTSNE(juntti_OE, dims = 1:10)
+
+# individual clusters
+DimPlot(juntti_OE, reduction = "umap")
+DimPlot(juntti_OE, reduction = "tsne")
+```
+
+
+# Find Markers
+
+```{r}
+juntti_OE.markers <- FindAllMarkers(juntti_OE, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+juntti_OE.markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 2, order_by = avg_log2FC) %>%
+  print.data.frame()
+```
+
+```{r, echo = FALSE, eval = FALSE}
+saveRDS(juntti_OE, file = "../data/juntti_index.rds")
+```
+
+
+
+```{r, eval = FALSE, echo = FALSE}
+
+counts=(juntti_OE@meta.data[["nCount_RNA"]])
+quantile(counts, prob=c(0.05,0.25,0.5,0.75,0.95,1))
+features=(juntti_OE@meta.data[["nFeature_RNA"]])
+mitochondria=(juntti_OE@meta.data[["percent.mt"]])
+quantile(features, prob=c(0.05,0.25,0.5,0.75,0.95,1))
+quantile(mitochondria, prob=c(0.05,0.25,0.5,0.75,0.95,1))
+hist(counts, xlab = "UMIs per barcode", breaks = 50, main = NULL )
+hist(features, xlab= "Features per barcode", breaks = 20, main = NULL)
+hist(mitochondria, xlab = "% mitochondrial contamination", main= NULL)
+
+metadata= burtoni_OE@meta.data
+metadata %>%
+  	ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=percent.mt)) + 
+  	geom_point() + 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=NULL) +
+  	scale_x_log10() + 
+  	scale_y_log10() + 
+  	theme_classic() +
+    geom_hline(yintercept =400) +
+  	geom_vline(xintercept =540) 
+  	
+
+#Filter cells with >20% mitochondrial counts
+min_feature<-0
+max_feature<-6000
+mt_percent<-20
+burtoni_OE <- subset(burtoni_OE, subset = nFeature_RNA > min_feature & nFeature_RNA < max_feature & percent.mt <mt_percent) 
+#log normalize the data and scale to 10,000
+burtoni_OE <- NormalizeData(burtoni_OE, normalization.method = "LogNormalize", scale.factor = 10000)
+# next identify 2000 differentially expressed features (genes) that distinguish different cell types
+# and can be used for PC analyses
+burtoni_OE <- FindVariableFeatures(burtoni_OE, selection.method = "vst", nfeatures = 2000)
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(burtoni_OE), 10)
+#plot variable features with and without labels
+plot1 <- VariableFeaturePlot(burtoni_OE)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+
+
+# Shift data so mean expression across cells is 0
+# Scale each gene so variance across cells is 1. This prevents high express genes from dominating
+# results in burtoni_OE[["RNA"]]@scale.data
+
+#perform PCA on data
+burtoni_OE <- RunPCA(burtoni_OE, features = VariableFeatures(object = burtoni_OE))
+
+# Examine and visualize PCA results: 
+# a. show positive and negative loadings on each pc axis for 5 PC axes
+#print(burtoni_OE[["pca"]], dims = 1:5, nfeatures = 5) 
+# b. show loadings of top genes on two of PC axes - this seems to only show positive loadings
+#VizDimLoadings(burtoni_OE, dims = 1:2, reduction = "pca")
+# c. plot data in pc1 & 2 space
+#DimPlot(burtoni_OE, reduction = "pca")
+# d. show data as heatmap with 1 or more dimensions
+#  - this can be used to determine how many PC's are informative
+#DimHeatmap(burtoni_OE, dims = 1:12, cells = 500, balanced = TRUE)
+# e. An alternative to determining # of PC's is to use Jackstraws
+# NOTE: This process can take a long time for big datasets, comment out for expediency.
+# More approximate techniques such as those implemented in ElbowPlot() can be 
+# used to reduce computation time
+
+#Determine PC cutoff 
+ElbowPlot(burtoni_OE, ndims=50)
+# Seurat suggests the PC cutoff should be the smaller PC value of 2 calculated metrics: (1) The PC at which cumulative % variation > 90% and the % variation associated with the PC is less than 5%. (2) The last PC where change of % variation is more than 0.1%. Calculate both metrics and pick the smaller PC as the cut off:
+
+# Determine percent of variation associated with each PC
+pct <- burtoni_OE[["pca"]]@stdev / sum(burtoni_OE[["pca"]]@stdev) * 100
+pct
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+cumu
+co1
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+#take the smallest of the 2 calculated metrics
+pcs <- min(co1, co2)
+pcs
+#Cut off at 16 PCs?
+# Create a dataframe with values
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+write.csv(plot_df,"G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12/variation_PCs.csv")
+
+dim_clusters<-20
+res_clusters<-0.5
+
+burtoni_OE <- FindNeighbors(burtoni_OE, dims = 1:dim_clusters)
+burtoni_OE <- FindClusters(burtoni_OE, resolution = res_clusters)
+# Look at cluster IDs of the first 5 cells
+head(Idents(burtoni_OE), 5)
+
+# run UMAP
+burtoni_OE <- RunUMAP(burtoni_OE, dims = 1:dim_clusters)
+# note that you can set `label = TRUE` or use the LabelClusters function to help label
+# individual clusters
+#burtoni_OE <- RenameIdents(object = burtoni_OE, "0" = "ciliated OSNs", "1" = "?", "2" = "microvillous OSNs", "3" = "blood/damaged cells?", "4" = "immune-like", "5"="odorant binding proteins","6"="ciliary support cells","7"="developing OSNs","8"="mucus-secreting","9"="dying cells","10"="mitotic cells", "11"="mitotic cells","12"="multiplets?","13"= "mucus secreting cells","14"="immune-like", "15"="blood")
+#Rename the clusters
+
+DimPlot(burtoni_OE, reduction = "umap", label = TRUE, label.size = 3)
+FeaturePlot(object=burtoni_OE, features = "percent.mt", label=TRUE)
+
+all_markers_20PCs = FindAllMarkers(burtoni_OE)
+#Find all marker genes in all clusters and save file.This part takes a while to compute. Takes longer with more PCs.
+
+write.csv(all_markers_20PCs, "G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12/all_markers.csv", quote = F)
+
+#Return top 10 markers for cluster specified 'x'
+gen_marker_table <- function(x){
+  all_markers_20PCs[all_markers_20PCs$cluster ==x, ] %>%
+  head(n=10)
+}
+top10_markers_20PCs <- map_dfr(0:15, gen_marker_table)
+# Create a data frame of results for clusters 0-15 and save file
+
+View(top10_markers_20PCs)
+write.csv(top10_markers_20PCs, "G:/Shared drives/Juntti Lab/Single-cell work/Abur OE outputs 2021-12-12/top10_markers_20PCs.csv", quote = F)
+```
+
