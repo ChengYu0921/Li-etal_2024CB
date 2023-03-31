@@ -120,12 +120,14 @@ Fish Clade annotation info
 
 ```{r}
 # Load the cichlid OE dataset
-juntti.data <- Read10X(data.dir = "../AburtOE1_TArun/outs/filtered_feature_bc_matrix")
+juntti.data.OE1 <- Read10X(data.dir = "../OE1_data/processed_reads")
+juntti.data.OE2 <- Read10X(data.dir = "../OE2_data/processed_reads")
 
 # Initialize the Seurat object
-juntti_OE <- CreateSeuratObject(counts = juntti.data, project = "juntti_2trt_2ctrl", 
+juntti_OE1 <- CreateSeuratObject(counts = juntti.data.OE1, project = "juntti_2trt_2ctrl", 
                                  min.cells = 3, min.features = 200)
-all.genes <- rownames(juntti_OE)
+juntti_OE2 <- CreateSeuratObject(counts = juntti.data.OE2, project = "juntti_2trt_2ctrl", 
+                                 min.cells = 3, min.features = 200)
 ```
 
 ```{r, echo=FALSE, eval=FALSE}
@@ -177,12 +179,31 @@ OR_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/OR_genes.xlsx", s
 ## Read in output from souporcell
 
 ```{r, message = FALSE}
-soc_clusters <- read_tsv("~/scratch/reesyxan/juntti_cichlid/soup_out_4k/soup_out/clusters.tsv", col_names = TRUE)
+soc_clusters.OE1 <- read_tsv("~/scratch/reesyxan/juntti_cichlid/OE1_data/soup_out_4k/soup_out/clusters.tsv", col_names = TRUE)
+soc_clusters.OE2 <- read_tsv("~/scratch/reesyxan/juntti_cichlid/OE2_data/souporcell/OE2_souporcell/clusters.tsv", col_names = TRUE)
 
-soc_clusters <- soc_clusters[soc_clusters$barcode %in% Cells(juntti_OE),]
-soc_clusters <- soc_clusters[match(soc_clusters$barcode, Cells(juntti_OE)),]
-juntti_OE <- AddMetaData(object = juntti_OE, metadata = soc_clusters$status, col.name = "souporcell_status")
-juntti_OE <- AddMetaData(object = juntti_OE, metadata = soc_clusters$assignment, col.name = "souporcell_assignment")
+
+soc_clusters.OE1 <- soc_clusters.OE1[soc_clusters.OE1$barcode %in% Cells(juntti_OE1),]
+soc_clusters.OE2 <- soc_clusters.OE2[soc_clusters.OE2$barcode %in% Cells(juntti_OE2),]
+
+soc_clusters.OE1 <- as.data.frame(soc_clusters.OE1[match(soc_clusters.OE1$barcode, Cells(juntti_OE1)),])
+soc_clusters.OE2 <- as.data.frame(soc_clusters.OE2[match(soc_clusters.OE2$barcode, Cells(juntti_OE2)),])
+
+
+rownames(soc_clusters.OE2) <- soc_clusters.OE2$barcode
+
+juntti_OE1 <- AddMetaData(object = juntti_OE1, metadata = soc_clusters.OE1$status, col.name = "souporcell_status")
+juntti_OE1 <- AddMetaData(object = juntti_OE1, metadata = soc_clusters.OE1$assignment, col.name = "souporcell_assignment")
+
+juntti_OE2 <- AddMetaData(object = juntti_OE2, metadata = soc_clusters.OE2$status, col.name = "souporcell_status")
+juntti_OE2 <- AddMetaData(object = juntti_OE2, metadata = soc_clusters.OE2$assignment, col.name = "souporcell_assignment")
+
+
+OE.combined <- merge(juntti_OE1, y = juntti_OE2, add.cell.ids = c("OE1", "OE2"))
+OE.combined
+
+all.genes <- rownames(OE.combined)
+
 ```
 
 These are the metrics for how many cells were assigned to "singlet", "doublet", or "unassigned"

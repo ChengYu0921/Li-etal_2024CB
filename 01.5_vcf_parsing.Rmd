@@ -1,0 +1,433 @@
+---
+title: "vcf Parsing"
+author: "Theresa Alexander"
+date: "2/14/2022"
+output:
+  html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    number_sections: true
+    self_contained: true
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+  rmdformats::readthedown:
+    code_download: true
+    code_folding: show
+    df_print: paged
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    width: 300
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+  BiocStyle::html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+---
+<style type="text/css">
+body, td {
+  font-size: 16px;
+}
+code.r{
+  font-size: 16px;
+}
+pre {
+ font-size: 16px
+}
+</style>
+
+
+```{r, echo = FALSE}
+#https://speciationgenomics.github.io/filtering_vcfs/
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+library(vcfR)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(tidyr)
+```
+
+# Helper VCF functions
+
+```{r}
+qual_filter <- function(vcf_obj, qual_cutoff_min = 20) {
+  quals <- getQUAL(vcf_obj)
+  message("Filtering ", sum(is.na(quals)), " variants without a quality score.")
+  fix_new <- quals[!is.na(quals)]
+  message("Filtering ", sum(fix_new < qual_cutoff_min), " variants with a quality score less than ", qual_cutoff_min, ".")        
+  fix_new <- vcf_obj@fix[quals >= 30 & !is.na(quals),]
+  vcf_obj@fix <- fix_new
+  gt_new <- vcf_obj@gt[quals >= 30 & !is.na(quals),]
+  vcf_obj@gt <- gt_new
+  message("There are ", nrow(fix_new), " variants left after filtering.")
+  return(vcf_obj)
+}
+
+get_variant_global_rd <- function(vcf_obj, rd_pattern = "DP="){
+  info <- getINFO(vcf_obj)
+  vcf_rd <- info %>%
+    str_split(pattern = ";") %>%
+    unlist() %>%
+    grep(pattern = rd_pattern, value = TRUE) %>%
+    str_remove(rd_pattern) %>%
+    as.data.frame() 
+  colnames(vcf_rd) <- c("Read_Depth")
+  vcf_rd$Read_Depth <- as.numeric(vcf_rd$Read_Depth)
+  return(vcf_rd)
+}
+
+filter_variant_rd <- function(vcf_obj, min_rd = 20, max_rd = 80, type = "global"){
+  message(nrow(vcf_obj@fix), " variants before filtering.")
+  if (type == "global") {
+  rd <- get_variant_global_rd(vcf_obj)
+  message("There are ", sum(rd < min_rd | rd > max_rd), " variants being filtered.")
+  vcf_fix_filt <- vcf_obj@fix[rd > min_rd & rd < max_rd,]
+  vcf_gt_filt <- vcf_obj@gt[rd > min_rd & rd < max_rd,]
+  vcf_obj@fix <- vcf_fix_filt
+  vcf_obj@gt <- vcf_gt_filt
+  } else if (type == "cluster"){
+    gt <- vcf_obj@gt %>%
+    as.data.frame() %>%
+    select(-c("FORMAT")) 
+  rd_ind <- matrix(nrow = nrow(gt), ncol = ncol(gt))
+  colnames(rd_ind) <- colnames(gt)
+   for (i in 1:ncol(gt)){
+     split <- str_split(gt[,i], pattern = ":")
+     for (j in 1:length(split)){
+       rd_ind[j,i] <- sum(as.numeric(split[[j]][c(2,3)]))
+     }
+   }
+  rd_ind_min <- apply(rd_ind, 1, FUN = min)
+  vcf_fix_filt <- vcf_obj@fix[rd_ind_min > min_rd,]
+  vcf_gt_filt <- vcf_obj@gt[rd_ind_min > min_rd,]
+  vcf_obj@fix <- vcf_fix_filt
+  vcf_obj@gt <- vcf_gt_filt
+  }
+  message(nrow(vcf_obj@fix), " variants remaining.")
+  return(vcf_obj)
+}
+
+
+get_vcf_genotypes <- function(vcf_obj){
+  gt <- vcf_obj@gt %>%
+    as.data.frame() %>%
+    select(-c("FORMAT")) 
+  gt_new <- matrix(nrow = nrow(gt), ncol = ncol(gt))
+  colnames(gt_new) <- colnames(gt)
+   for (i in 1:ncol(gt)){
+    gt_new[,i] <- substr(gt[,i], start = 0, stop = 3)
+   }
+  return(gt_new)
+}
+
+
+filter_vcf_genotypes <- function(vcf_obj, gt_to_filter = "./.") {
+  gt_new <- get_vcf_genotypes(vcf_obj)
+  gt <- vcf_obj@gt
+  gt_filt <- gt[rowSums(gt_new == gt_to_filter)==0, , drop = FALSE]
+  message("Filtering ", nrow(gt) - nrow(gt_filt), " variants with genotype '", gt_to_filter, "'.")
+  vcf_obj@gt <- as.matrix(gt_filt)
+  fix_filt <- vcf_obj@fix[rowSums(gt_new == gt_to_filter)==0, , drop = FALSE]
+  vcf_obj@fix <- as.matrix(fix_filt)
+  message(nrow(vcf_obj@fix), " variants remaining.")
+  return(vcf_obj)
+}
+
+
+get_discriminative_variants <- function(vcf_obj){
+  gt_new <- get_vcf_genotypes(vcf_obj)
+  keepers <- c()
+  for (i in 1:nrow(gt_new)) {
+    if (sum(table(gt_new[i,])%%2 == 0) == 0) { #messy way of asking if any of the numbers in the table are even
+      keepers <- c(keepers, i)
+    }
+  }
+  message(length(keepers), " discriminative variants found.")
+  vcf_obj@gt <- vcf_obj@gt[keepers,]
+  vcf_obj@fix <- vcf_obj@fix[keepers,]
+  return(vcf_obj)
+}
+
+
+filter_background <- function(vcf_obj, filter_pattern = "BACKGROUND"){
+  filter <- getFILTER(vcf_obj)
+  remove <- which(filter == filter_pattern)
+  message("Filtered ", length(remove), " variants with filter label: ", filter_pattern, ".")
+  vcf_obj@fix <- vcf_obj@fix[-remove,]
+  vcf_obj@gt <- vcf_obj@gt[-remove,]
+  message(nrow(vcf_obj@gt), " variants remaining.")
+  return(vcf_obj)
+}
+
+```
+
+# Read in VCF
+```{r}
+vcf <- read.vcfR( "~/scratch/reesyxan/juntti_cichlid/soup_out_4k/soup_out/cluster_genotypes.vcf")
+
+#filter out background variants
+vcf <- filter_background(vcf)
+```
+
+# Quality Score Interrogation 
+
+
+## Look at Quality scores for given contig
+
+Qual Cutoff:
+A score to indicate the quality of the variant call (is this a real variant or not that freebayes is calling a variant). Genotype quality is an important filter - essentially you should not trust any genotype with a Phred score below 20 which suggests a less than 99% accuracy. Let's look at the distribution of quality scores we have in our variant calls. 
+
+```{r, warning=FALSE, message=FALSE}
+var_qual <- getQUAL(vcf)
+
+summary(var_qual)
+
+var_qual[var_qual < 1500] %>%
+  as.data.frame() %>%
+  ggplot(aes(.)) + 
+  geom_density(fill = "dodgerblue1", colour = "black", alpha = 0.3)+
+  theme_light() +
+  geom_vline(xintercept = 30, col = "red")
+```
+
+Based on the quality of the sites called as variants, we can see the majority of them are not high confidence variant sites. The red line indicates a qual score of 30, which is a 1 in 1000 chance that the variant call is erroneous.
+
+```{r, echo = FALSE}
+message(sum(var_qual > 30 & !is.na(var_qual)), " out of ", length(var_qual), " (53.4%) of variants have a quality score > 30.")
+```
+
+We likely don't have a higher number of variants with high quality scores because our depth for most of these variants is not very large. Let's look at that below.
+<br>
+
+## Read Depth for each variant
+
+Next we will examine the mean depth for each of our variants. This is essentially the number of reads that have mapped to this position.
+<br>
+
+Depth cutoffs:
+Minimum depth cutoffs will remove false positive calls and will ensure higher quality calls too. A maximum cutoff is important because regions with very, very high read depths are likely repetitive ones mapping to multiple parts of the genome.
+<br>
+
+
+```{r}
+vcf_rd <- get_variant_global_rd(vcf_obj = vcf)
+
+ggplot(vcf_rd, aes(Read_Depth)) + geom_density(fill = "dodgerblue1", colour = "black", alpha = 0.3) + 
+    theme_light() + 
+    ggtitle("Density of Read Depth per Variant")
+```
+
+this plot is a bit misleading because clearly, there are very few variants with extremely high coverage indeed. 
+
+<br>
+
+
+```{r, echo=FALSE,eval=FALSE}
+### Side bar: 
+#Which variants are these that have a ridiculous number of reads? why do we have any variants with 40k reads?
+
+vcf_rd_filt <- filter_variant_rd(vcf, min_rd = 10000, max_rd = 43000)
+vcf_rd_filt@fix[1:5, 1:7]
+#I need to dig into this further but I haven't yet....
+
+```
+
+<br>
+
+Let’s take a closer at the mean depth:
+
+```{r}
+summary(vcf_rd$Read_Depth)
+```
+Most variants have a depth of 41-85x whereas there are some extreme outliers. We will redraw our plot to exclude these and get a better idea of the distribution of mean depth.
+
+```{r}
+b <- vcf_rd %>%
+  ggplot(aes(Read_Depth)) + 
+  geom_density(fill = "dodgerblue1", colour = "black", alpha = 0.3) + xlim(0, 200)
+
+b + theme_light() + ggtitle("Density of Read Depth per Variant (20 < RD < 200)")
+```
+
+
+This gives a better idea of the distribution. We could set our minimum coverage at the 5 and 95% quantiles but we should keep in mind that the more reads that cover a site, the higher confidence our basecall is.
+
+What is more important here is that we set a good maximum depth cutfoff. As the outliers show, some regions clearly have extremely high coverage and this likely reflects mapping/assembly errors and also repetitive regions. We want to exclude these as they will bias our analyses. Usually a good rule of thumb is multiplying the median depth x 2 - so in this case we could set our maximum depth at 80x.
+
+So we will set our minimum depth to 20x and our maximum depth to 80x.
+
+## Souporcell-specific quality scores
+
+In our vcf file, this information is found in the cluster_genotypes.vcf file as part of the last column. The "INFO" column includes a lot of messy looking stuff, but here is the breakdown of an example row.
+
+CHROM  POS     ID      REF     ALT     QUAL    FILTER  INFO    FORMAT  0       1       2       3
+<br>
+NW_024582362.1  4857    .       T       G       .       .       NS=1;DP=276;DPB=276.0;AC=0;AN=2;AF=0.0;RO=250;AO=26;PRO=0.0;PAO=0.0;QR=8468;QA=868;PQR=0.0;PQA=0.0;SRF=250;SRR=0;SAF=26;SAR=0;SRP=545.878;SAP=59.4686;AB=0.0;ABP=0.0;RUN=1;RPP=4.34659;RPPR=48.038;RPL=11.0;RPR=15.0;EPP=4.34659;EPPR=48.038;DPRA=0.0;ODDS=145.473;GTI=0;TYPE=snp;CIGAR=1X;NUMALT=1;MEANALT=1.0;LEN=1;MQM=57.7308;MQMR=59.568;PAIRED=0.0;PAIREDR=0.0    GT:AO:RO:T:E:GO:GN      0/1:7:9:-7:-21:-24,-14,-2:-21,-12,0     0/0:0:19:-7:-21:-1,-48,-12:0,-47,-11    0/0:1:36:-7:-21:-2,-87,-20:0,-84,-18    0/0:0:14:-7:-21:-1,-35,-9::0,-34,-8
+
+
+The important parts to us are found in the last 4 columns with some long strings of gibberish-looking stuff. These contain lots of useful info.
+1. The first 3 characters in each of these columns indicate the genotype for that given variant assigned to cells in that column's cluster. For example, in the example above, cluster 0 has a genotype of 0/1, cluster 1's genotype is 0/0, cluster 2's genotype is 0/0, and cluster 3's genotype is 0/0. 
+2. The next string which has 6 colon-separated fields which contain the following metrics, AO:RO:T:E:GO:GN, some of which are defined in the vcf header and some are not. The first two fields are as follows:
+
+AO: Description="Alternate allele observation count", ie, how many times the alternate allele was counted for each cluster
+RO: Description="Reference allele observation count", ie, how many times the reference allele was counted for each cluster
+
+GO: non normalized (log likelihood) for each genotype in that cluster
+GN: posterior log probability (so normalized) for each genotype in that cluster
+
+The next fields (T,E,GO,and GN) are not defined in the header info. After scouring the interwebs, I found a git issue where someone asked the package author the same question and this is his response:
+https://github.com/wheaton5/souporcell/issues/110
+
+"Hmm... I am trying to figure this out as well lol. Its been a while since i wrote this code. T and E seem to be about whether the ambient RNA + genotyping model thought this variant was truth vs error? But this might be referring to two different types of errors, will have to inspect code further. GO appears to be the non normalized (log likelihood) for each genotype and the GN appears to be a posterior log probability (so normalized) for each genotype. Okay so reading more and T and E are log likelihoods of true variant vs arising from ambient RNA. So the posterior probabilities would be exp(T - log(exp(T)+exp(E))). Basically how it works is that each cluster after doublet removal has certain allele counts and those could arise from that individual being homozygous ref + some soup, homozygous alt + some soup, het + some soup, or the entire variant could be a false positive in which case all individuals will have the same underlying allele fractions and that is the (E)rror case."
+
+From this (not very clear) explanation, I will define T and E as follows:
+T: log likelihood of the variant being a true positive
+E: log likelihood of the variant being a false positive because of ambient RNA
+
+Going back to our example variant above, the scores would be as follows for cluster 0
+GT: 0/1
+AO: 7
+R0: 9
+T: -7
+E: -21
+GO: -24,-14,-2 (0/0, 1/1, 0/1)
+GN: -21,-12,0 (0/0, 1/1, 0/1)
+
+<br>
+
+Let's plot the distribution of T and E scores to get a sense of the quality of our variants called from freebayes.
+
+
+```{r}
+vcf_gt <- vcf@gt[,2] %>%
+  str_split(pattern = ":") %>%
+  unlist() %>%
+  matrix(ncol = 7, byrow = TRUE) %>%
+  as.data.frame()
+
+colnames(vcf_gt) <- c("GT", "A0", "R0", "T", "E", "GO", "GN")
+```
+
+
+```{r, warning=FALSE}
+data_long <- gather(vcf_gt, Type, Score, T:E)
+data_long$Score <- as.numeric(data_long$Score)
+ggplot(data_long, aes(x=Score, fill=Type)) + 
+  geom_histogram(alpha=0.3, position="identity") + 
+  theme_light() +
+  xlim(c(-50,0)) 
+```
+
+## Proposed Cutoffs
+
+With all this, I propose the following criteria for cutoffs to start to cull the variant list.
+
+1. QUAL > 30
+2. 20 < RD < 80
+3. No genotypes for any cluster can be ./.
+4. variants with only 1 cluster with a unique genotype (for example, cluster 0 has a genotype of 0/0, the rest of the clusters are 1/1)
+5. Then from this list, choose variants with the most discrete log likelihood between cluster genotypes
+
+
+# VCF Subsetting
+
+## 1. QUAL > 30
+
+```{r}
+vcf_filter <- qual_filter(vcf, qual_cutoff_min = 30)
+```
+
+## 2. 20 < RD across all Samples < 80
+```{r}
+vcf_filter <- filter_variant_rd(vcf_filter, min_rd = 20, max_rd = 80)
+```
+
+
+## 3. RD per cluster Filtering
+We want to keep variants who have at least n number of reads mapped to the cluster with the lowest amount of reads for that variant:
+
+min(n_i) > 10
+
+```{r}
+vcf_filter <- filter_variant_rd(vcf_filter, type = "cluster", min_rd = 5)
+```
+
+
+## 4. No genotypes for any cluster can be ./.
+```{r}
+vcf_filter <- filter_vcf_genotypes(vcf_filter)
+```
+
+## 4. Filter variants with Hets
+
+This may not be necessary if doing sanger sequencing. You'll just get two peaks instead of 1 for the het call, which would still be fine.
+
+```{r}
+vcf_filter <- filter_vcf_genotypes(vcf_filter, gt_to_filter = "0/1")
+```
+## 5. variants with only 1 cluster with a unique genotype (for example, cluster 0 has a genotype of 0/0, the rest of the clusters are 1/1)
+
+```{r}
+#vcf_filter <- get_discriminative_variants(vcf_filter)
+head(cbind(as.data.frame(vcf_filter@fix)[,c("CHROM", "POS")], get_vcf_genotypes(vcf_filter)))
+```
+What we have so far after filtering. These are all variants which have either homozygous genotype in a cluster. 
+
+After the filtering to this point, we have 52 variants to choose from. 
+
+## Label each variant with which cluster they are discriminative for
+
+```{r}
+gt <- get_vcf_genotypes(vcf_filter)
+```````````````````disc_cluster <- c()
+for (i in 1:nrow(gt)){
+  freqs <- table(gt[i,])
+  unique_gt <- names(freqs[freqs == 1])
+  indx <- which(gt[i,] == unique_gt)
+  disc_cluster <- c(disc_cluster, unname(indx - 1))
+}
+
+table(disc_cluster)
+```
+
+
+With these filtering criteria, this is the number of variants we have which we have deemed discriminative for each cluster.
+
+<br>
+This is the top of the dataframe which holds the data for each variant.
+
+```{r, echo=FALSE}
+var_list <- cbind(as.data.frame(vcf_filter@fix)[,c("CHROM", "POS")], get_vcf_genotypes(vcf_filter), disc_cluster)
+var_list[order(var_list$CHROM),]
+```
+
+```{r}
+library(xlsx)
+write.xlsx2(var_list, file = "filtered_variant_list.xlsx")
+```
+
+
+# TO DO
+
+

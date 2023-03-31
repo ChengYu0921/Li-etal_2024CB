@@ -1,0 +1,43 @@
+---
+title: "Loading Seurat Object and Some Examples"
+author: "Theresa Alexander"
+date: "2/24/2022"
+output: html_document
+---
+
+# Load the Seurat Object
+
+```{r}
+load("seurat_juntti_v2242022.rda")
+```
+
+This seurat object comes preloaded with a few pieces of metadata that are important.
+<br>
+All metadata can be found if you print the object, juntti_OE_new. For example:
+
+```{r}
+head(juntti_OE_new)
+```
+
+The pieces of metadata that I've added which are important are the following columns in that dataframe:
+1. OR_counts: the number of ORs in each cell. Only the cells in the neuronal clusters (including the immature ones) have a value for this. <br>
+2. souporcell_assignment: the souporcell cluster which each cell belongs to. These are values between 0 and 3. <br>
+3. souporcell_status: This column indicates if a cell is a doublet, singlet, or unassigned. 
+
+Note: This dataset has not been filtered for the percent mt, ncounts, or nfeatures. So to do this, you should do the following beofre doing more downstream analysis:
+
+```{r}
+juntti_OE_new <- subset(juntti_OE_new, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 5)
+```
+
+
+Now you can do things like run PCA, UMAP, and then plot based on features like the souporcell cluster, status, or other things.
+
+An example of how you would make this UMAP plot (once you do the PCA/UMAP reductions), would be like this:
+
+```{r}
+DimPlot(juntti_OE_new, reduction = "umap", group.by = "souporcell_assignment")
+```
+
+You can change the "group.by" to be equal to any of the features we've computed (which are the columns you see when you do the head(juntti_OE_new) line of code above).
+

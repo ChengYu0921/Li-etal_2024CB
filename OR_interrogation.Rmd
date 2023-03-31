@@ -1,0 +1,171 @@
+---
+title: "OR Interrogation"
+author: "Theresa Alexander"
+date: "3/4/2022"
+output: html_document
+---
+
+We have a few questions we want to look in to regarding the OR expressing cells.
+
+Tasks from 3/2 meeting: <br>
+
+- what are the most represented ORs we have <br>
+- how much fos is a single class expressing (where a class is a single receptor) <br>
+
+
+# Libraries
+
+```{r, message = FALSE}
+library("xlsx")
+library("Seurat")
+library("dplyr")
+library("ggplot2")
+library("knitr")
+```
+# Helper Functions
+
+```{r}
+genes_avg_expression <- function(seur_obj, features, slot = "counts"){
+  #get counts
+  counts <- as.data.frame(GetAssayData(object = seur_obj, slot = slot))
+  
+  #subset out features OI
+  for (i in seq_along(features)){
+  counts_oi <- counts %>%
+    filter(row.names(counts) %in% features[[i]])
+
+    mean_exp <- colMeans(counts_oi)
+    colname <- paste0( names(features)[i], "_Means")
+    #mean_exprs[[colname]] <- mean_exp
+    seur_obj <- AddMetaData(object = seur_obj, metadata = mean_exp, col.name = colname)
+
+    sum_exp <- colSums(counts_oi)
+    colname <- paste0( names(features)[i], "_Sums")
+    seur_obj <- AddMetaData(object = seur_obj, metadata = sum_exp, col.name = colname)
+  }
+  return(seur_obj)
+}
+```
+
+
+# Load the Seurat Object
+
+```{r}
+load("seurat_juntti_v2242022.rda")
+```
+
+
+# Filtering and normalization
+
+We’ve identified clusters 0 and 3 as being exposed to our pheromone; clusters 1&2 were exposed to the control odor.
+
+## Adding in Fish assignments to metadata
+
+```{r}
+fish_assignments <- c(rep("NA", nrow(juntti_OE_new@meta.data)))
+fish_assignments[which(juntti_OE_new@meta.data$souporcell_assignment %in% c(0,3))] <- "pheromone_exposed"
+fish_assignments[which(juntti_OE_new@meta.data$souporcell_assignment %in% c(1,2))] <- "control"
+
+juntti_OE_new <- AddMetaData(juntti_OE_new, metadata = fish_assignments, col.name = "fish_assignments")
+```
+
+
+```{r}
+all.genes <- rownames(juntti_OE_new)
+juntti_OE_new <- subset(juntti_OE_new, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 5)
+juntti_OE_new <- subset(juntti_OE_new, subset = souporcell_status == "singlet")
+
+juntti_OE_new <- NormalizeData(juntti_OE_new, normalization.method = "LogNormalize", scale.factor = 10000)
+juntti_OE_new <- ScaleData(juntti_OE_new, features = all.genes)
+
+juntti_OE_new <- FindVariableFeatures(juntti_OE_new, selection.method = "vst", nfeatures = 2000)
+juntti_OE_new <- RunPCA(juntti_OE_new, features = VariableFeatures(object = juntti_OE_new))
+
+juntti_OE_new <- FindNeighbors(juntti_OE_new, dims = 1:13)
+juntti_OE_new <- FindClusters(juntti_OE_new, resolution = c(0.5))
+juntti_OE_new <- RunUMAP(juntti_OE_new, dims = 1:13)
+```
+
+
+## List of OR Genes of interest
+
+```{r}
+V1R_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "V1R_genes")
+OR_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "OR_genes")
+V2R_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "V2R_genes")
+TAAR_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "TAAR_genes")
+```
+
+# How many cells per receptor do we have?
+
+```{r}
+juntti_OE_neuronal <- subset(x = juntti_OE_new, idents = c(0,1))
+
+#subset `juntti_OE_neuronal` for only the CR genes
+juntti_OE_neuronal_CRs <- as.data.frame(GetAssayData(object = juntti_OE_neuronal, slot = "data")) 
+juntti_OE_neuronal_CRcounts <- juntti_OE_neuronal_CRs %>%
+  filter(row.names(juntti_OE_neuronal_CRs) %in% c(V1R_genes$LOC, V2R_genes$Symbol, OR_genes$Symbol, TAAR_genes$Symbol)) %>%
+  apply(1, function(x)sum(x!=0)) %>%
+  as.data.frame()
+
+colnames(juntti_OE_neuronal_CRcounts) <- c("counts")
+juntti_OE_neuronal_CRcounts$LOC <- rownames(juntti_OE_neuronal_CRcounts)
+
+ggplot(juntti_OE_neuronal_CRcounts, aes(x = 1:nrow(juntti_OE_neuronal_CRcounts), y = counts)) + 
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(x = "Individual CRs", y = "Number of Cells Per CR") + 
+  theme_classic()
+
+hist(juntti_OE_neuronal_CRcounts$counts, breaks = 100, main = "Histogram of Cells Per CR", xlab = "")
+summary(juntti_OE_neuronal_CRcounts$counts)
+
+```
+
+Most CRs have a mean of ~48 neuronal cells which express them.
+
+
+
+# What are the most represented ORs we have?
+
+```{r}
+#write.xlsx(juntti_OE_neuronal_CRcounts[order(juntti_OE_neuronal_CRcounts$counts, decreasing = TRUE), c("LOC", "counts")], file = "../excel/cellcounts_per_CR.xlsx")
+ordered <- juntti_OE_neuronal_CRcounts[order(juntti_OE_neuronal_CRcounts$counts, decreasing = TRUE), c("LOC", "counts")]
+
+kable(ordered[ordered$LOC %in% V1R_genes$LOC,], caption = "V1R Genes")
+kable(ordered[ordered$LOC %in% V2R_genes$Symbol,], caption = "V2R Genes")
+kable(ordered[ordered$LOC %in% OR_genes$Symbol,], caption = "OR Genes")
+kable(ordered[ordered$LOC %in% TAAR_genes$Symbol,], caption = "TAAR Genes")
+```
+
+
+
+
+# Get average expression for each CR type
+
+sum (or average) expression of each OR type, then plot on UMAP <br>
+
+```{r}
+features <- list("V1R_genes" = V1R_genes$LOC, "V2R_genes" = V2R_genes$Symbol, "OR_genes" = OR_genes$Symbol, "TAAR_genes" = TAAR_genes$Symbol)
+juntti_OE_new <- genes_avg_expression(seur_obj = juntti_OE_new, features = features, slot = "data")
+juntti_OE_neuronal2 <- subset(x = juntti_OE_new, idents = c(0,1))
+
+FeaturePlot(juntti_OE_neuronal2, features = "V1R_genes_Sums")
+FeaturePlot(juntti_OE_neuronal2, features = "V2R_genes_Sums")
+FeaturePlot(juntti_OE_neuronal2, features = "OR_genes_Sums")
+FeaturePlot(juntti_OE_neuronal2, features = "TAAR_genes_Sums")
+
+FeaturePlot(juntti_OE_new, features = "V1R_genes_Sums")
+FeaturePlot(juntti_OE_new, features = "V2R_genes_Sums")
+FeaturePlot(juntti_OE_new, features = "OR_genes_Sums")
+FeaturePlot(juntti_OE_new, features = "TAAR_genes_Sums")
+```
+
+
+
+# Save Seurat Object
+
+```{r}
+save(juntti_OE_new, file = "juntti_OR_interrogation_output.rda")
+```
+
+

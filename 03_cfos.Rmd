@@ -1,0 +1,217 @@
+---
+title: "cfos Comparisons"
+author: "Theresa Alexander reesyxan@umd.edu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    number_sections: true
+    self_contained: true
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+  rmdformats::readthedown:
+    code_download: true
+    code_folding: show
+    df_print: paged
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    width: 300
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+  BiocStyle::html_document:
+    code_download: true
+    code_folding: show
+    fig_caption: true
+    fig_height: 7
+    fig_width: 7
+    highlight: tango
+    keep_md: false
+    mode: selfcontained
+    toc_float: true
+---
+<style type="text/css">
+body, td {
+  font-size: 16px;
+}
+code.r{
+  font-size: 16px;
+}
+pre {
+ font-size: 16px
+}
+</style>
+
+# Setup
+
+```{r, message = FALSE}
+library("xlsx")
+library("Seurat")
+library("dplyr")
+library("ggplot2")
+```
+
+
+# Load Data
+This is the Seurat object with the count data and metadata we have collected so far
+```{r}
+load("seurat_juntti_v4202022.rda")
+```
+
+# Ciliated cfos expressing vs Ciliated cfos not-expressing
+
+We want to find markers which may be co-expressed with cfos. Ideally, we would do a pariwise correlation between cfos expression and all other genes to find not only something which is present when cfos is present, but in a linearly-correlated way. This isn't practical for our data since we only have a few cells in the population where we have detected cfos expression (doesn't mean the other cells aren't expressing it, but it oes mean that with the snRNAseq and lower read depth, we didn't detect it). The alternative is to do a DE between the cfos expressing cells and the non-cfos expressing genes to at least find genes which are present when cfos is and not present when cfos isn't. We will focus this on the ciliated neuronal cell population (cluster 0).
+
+First thing we need to do is create a metadata column to indicate "cfos expressing" vs "cfos not-expressing" to use as a factor in the DE. 
+
+```{r}
+exprs <- GetAssayData(juntti_OE_new, slot = "counts") #pull out count data
+cfos_exprs <- exprs["fosab", ] #subset just cfos
+names(cfos_exprs) <- colnames(exprs)
+
+cfos_exprs[cfos_exprs > 0] <- "Exprs"
+cfos_exprs[cfos_exprs == 0] <- "No_Exprs"
+
+juntti_OE_new <- AddMetaData(object = juntti_OE_new, metadata = cfos_exprs, col.name = "cfos_expressing")
+```
+
+
+
+## Subset Ciliated Cells
+
+This is the population of ciliated cells.
+```{r}
+juntti_03_clust0 <- subset(juntti_OE_new, idents = c(0))
+```
+
+Let's plot it to make sure we subseted properly
+```{r}
+DimPlot(juntti_03_clust0, reduction = "umap", group.by = "cfos_expressing")
+FeaturePlot(juntti_03_clust0, features = c("fosab")) + ggtitle("cfos expression in \nCiliated Cells")
+```
+
+
+# Differential Expression
+
+We can now do the DE. 
+```{r}
+Idents(juntti_03_clust0) <- juntti_03_clust0$cfos_expressing
+
+DE <- FindMarkers(juntti_03_clust0, ident.1 = "Exprs", ident.2 = "No_Exprs")
+DE %>%
+  filter(p_val_adj < .05)
+```
+
+
+We get 3 hits other than cfos (fosab). <br>
+- LOC102297268 - apoptosis regulator BAX <br>
+- rfc2 - replication factor C (activator 1) 2 <br>
+- LOC106632882 - zinc finger SWIM domain-containing protein 8 <br>
+
+We can see the log2 fold change b/t fosab in these cell populations is 3.78 and the log2 fold change of this other genes are much less than that (which is to be expected since we artificially made the FC of fosab as large as possible). The pct.1 and pct.2 columns are the following:
+<br>
+pct.1 : The percentage of cells where the feature is detected in the first group
+pct.2 : The percentage of cells where the feature is detected in the second group <br>
+
+So this just confirms for us that we subsetted and set the DE factors correctly when looking at the fosab row (100% of the cells in group 1 have fosab expression and 0% in group 2 have fosab expression). 
+<br>
+<br>
+What this means for this other genes the following
+14.3% of cells in group 1 have LOC102297268 expression compared to only 2.3% of cells in group 2 with any expression
+12.2% of cells in group 1 have rfc2 expression compared to only 1.9% of cells in group 2 with any expression
+22.4% of cells in group 1 have LOC106632882 expression compared to only 5.5% of cells in group 2 with any expression
+
+<br>
+<br>
+
+# Looking into DE hits
+
+Let's plot these genes.
+```{r}
+FeaturePlot(juntti_03_clust0, features = c("fosab", "LOC102297268", "rfc2", "LOC106632882")) 
+```
+
+
+Let's look at the direct relationship between these genes and fosab.
+
+```{r}
+exprs_DEgenes <- t(as.matrix(exprs[rownames(exprs) %in% c("fosab", "LOC102297268", "rfc2", "LOC106632882"),]))
+exprs_DEgenes <- as.data.frame(exprs_DEgenes)
+
+exprs_DEgenes[exprs_DEgenes$fosab == 0, "fosab_exprs"]  <- "No_Exprs"
+exprs_DEgenes[exprs_DEgenes$fosab > 0, "fosab_exprs"]  <- "Exprs"
+
+exprs_DEgenes[exprs_DEgenes$rfc2 == 0, "rfc2_exprs"]  <- "No_Exprs"
+exprs_DEgenes[exprs_DEgenes$rfc2 > 0, "rfc2_exprs"]  <- "Exprs"
+
+exprs_DEgenes[exprs_DEgenes$LOC102297268 == 0, "LOC102297268_exprs"]  <- "No_Exprs"
+exprs_DEgenes[exprs_DEgenes$LOC102297268 > 0, "LOC102297268_exprs"]  <- "Exprs"
+
+exprs_DEgenes[exprs_DEgenes$LOC106632882 == 0, "LOC106632882_exprs"]  <- "No_Exprs"
+exprs_DEgenes[exprs_DEgenes$LOC106632882 > 0, "LOC106632882_exprs"]  <- "Exprs"
+
+```
+
+
+## How many cells do we have in each expression group?
+
+These are tables of the percentage of total cells in each expression group.
+
+```{r}
+exprs_DEgenes %>%
+  select(fosab_exprs, LOC102297268_exprs) %>%
+  table()/nrow(exprs_DEgenes) * 100
+
+exprs_DEgenes %>%
+  select(fosab_exprs, rfc2_exprs) %>%
+  table()/nrow(exprs_DEgenes) * 100
+
+exprs_DEgenes %>%
+  select(fosab_exprs, LOC106632882_exprs) %>%
+  table()/nrow(exprs_DEgenes) * 100 
+```
+This is another reason to be extremely skeptical. In each of these, over 88% of the cells are in the "no cfos/ no x gene" group. And in all of them, we have less than about half a percent of the cells are in the "exprs, exprs" group. I just odn't think we can trust any kind of statistical results here since we have such a heavy pool of the samples in the no/no group and so few in the yes/yes group.
+
+
+```{r}
+exprs_DEgenes %>%
+  #filter(LOC102297268 > 0) %>%
+  ggplot(aes(x = fosab_exprs, y = LOC102297268, fill = fosab_exprs)) + 
+  geom_point(position = position_jitter(seed = 1, width = 0.2)) +
+  geom_violin()  +
+  ggtitle("LOC102297268 ") + 
+  theme_classic() +
+  theme(legend.position = "none") + 
+
+exprs_DEgenes %>%
+  #filter(rfc2 > 0) %>%
+  ggplot(aes(x = fosab_exprs, y = rfc2, fill = fosab_exprs)) + 
+  geom_point(position = position_jitter(seed = 1, width = 0.2)) +
+  geom_violin()  +
+  ggtitle("rfc2 ") +
+  theme_classic() +
+  theme(legend.position = "none") + 
+
+exprs_DEgenes %>%
+  #filter(LOC106632882 > 0) %>%
+  ggplot(aes(x = fosab_exprs, y = LOC106632882, fill = fosab_exprs)) + 
+  geom_point(position = position_jitter(seed = 1, width = 0.2)) +
+  geom_violin()  +
+  ggtitle("LOC106632882") +
+  theme_classic() +
+  theme(legend.position = "none") 
+```
+
+The takeaway I get from this is I just have very little confidence in any results we do with the cfos comparisons because everything sequenced are just such few counts. Unfortunately, I don't think we can really say anything about cfos expression/coexpression. 

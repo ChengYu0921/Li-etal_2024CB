@@ -1,0 +1,322 @@
+---
+title: "OR Interrogation"
+author: "Theresa Alexander"
+date: "3/4/2022"
+output: html_document
+---
+
+We have a few questions we want to look in to regarding the OR expressing cells.
+
+Tasks from 3/2 meeting: <br>
+
+- what are the most represented ORs we have <br>
+- how much fos is a single class expressing (where a class is a single receptor) <br>
+
+
+# Libraries
+
+```{r, message = FALSE}
+library("xlsx")
+library("Seurat")
+library("dplyr")
+library("ggplot2")
+library("knitr")
+```
+# Helper Functions
+
+```{r}
+genes_avg_expression <- function(seur_obj, features, slot = "counts"){
+  #get counts
+  counts <- as.data.frame(GetAssayData(object = seur_obj, slot = slot))
+  
+  #subset out features OI
+  for (i in seq_along(features)){
+  counts_oi <- counts %>%
+    filter(row.names(counts) %in% features[[i]])
+
+    mean_exp <- colMeans(counts_oi)
+    colname <- paste0( names(features)[i], "_Means")
+    #mean_exprs[[colname]] <- mean_exp
+    seur_obj <- AddMetaData(object = seur_obj, metadata = mean_exp, col.name = colname)
+
+    sum_exp <- colSums(counts_oi)
+    colname <- paste0( names(features)[i], "_Sums")
+    seur_obj <- AddMetaData(object = seur_obj, metadata = sum_exp, col.name = colname)
+  }
+  return(seur_obj)
+}
+```
+
+
+# Load the Seurat Object
+
+```{r}
+load("seurat_juntti_v2242022.rda")
+```
+
+
+# Filtering and normalization
+
+We’ve identified clusters 0 and 3 as being exposed to our pheromone; clusters 1&2 were exposed to the control odor.
+
+## Adding in Fish assignments to metadata
+
+```{r}
+fish_assignments <- c(rep("NA", nrow(juntti_OE_new@meta.data)))
+fish_assignments[which(juntti_OE_new@meta.data$souporcell_assignment %in% c(0,3))] <- "pheromone_exposed"
+fish_assignments[which(juntti_OE_new@meta.data$souporcell_assignment %in% c(1,2))] <- "control"
+
+juntti_OE_new <- AddMetaData(juntti_OE_new, metadata = fish_assignments, col.name = "fish_assignments")
+```
+
+
+```{r}
+all.genes <- rownames(juntti_OE_new)
+juntti_OE_new <- subset(juntti_OE_new, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 5)
+juntti_OE_new <- subset(juntti_OE_new, subset = souporcell_status == "singlet")
+
+juntti_OE_new <- NormalizeData(juntti_OE_new, normalization.method = "LogNormalize", scale.factor = 10000)
+juntti_OE_new <- ScaleData(juntti_OE_new, features = all.genes)
+
+juntti_OE_new <- FindVariableFeatures(juntti_OE_new, selection.method = "vst", nfeatures = 2000)
+juntti_OE_new <- RunPCA(juntti_OE_new, features = VariableFeatures(object = juntti_OE_new))
+
+juntti_OE_new <- FindNeighbors(juntti_OE_new, dims = 1:13)
+juntti_OE_new <- FindClusters(juntti_OE_new, resolution = c(0.5))
+juntti_OE_new <- RunUMAP(juntti_OE_new, dims = 1:13)
+```
+
+
+## List of OR Genes of interest
+
+```{r}
+V1R_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "V1R_genes")
+OR_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "OR_genes")
+V2R_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "V2R_genes")
+TAAR_genes <- read.xlsx2("~/scratch/reesyxan/juntti_cichlid/data/CR_genes_ABurtoni.xlsx", sheetIndex = "TAAR_genes")
+```
+
+# How many cells per receptor do we have?
+
+```{r}
+juntti_OE_neuronal <- subset(x = juntti_OE_new, idents = c(0,1))
+
+#subset `juntti_OE_neuronal` for only the CR genes
+juntti_OE_neuronal_CRs <- as.data.frame(GetAssayData(object = juntti_OE_neuronal, slot = "data")) 
+juntti_OE_neuronal_CRcounts <- juntti_OE_neuronal_CRs %>%
+  filter(row.names(juntti_OE_neuronal_CRs) %in% c(V1R_genes$LOC, V2R_genes$Symbol, OR_genes$Symbol, TAAR_genes$Symbol)) %>%
+  apply(1, function(x)sum(x!=0)) %>%
+  as.data.frame()
+
+colnames(juntti_OE_neuronal_CRcounts) <- c("counts")
+juntti_OE_neuronal_CRcounts$LOC <- rownames(juntti_OE_neuronal_CRcounts)
+
+ggplot(juntti_OE_neuronal_CRcounts, aes(x = 1:nrow(juntti_OE_neuronal_CRcounts), y = counts)) + 
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(x = "Individual CRs", y = "Number of Cells Per CR") + 
+  theme_classic()
+
+hist(juntti_OE_neuronal_CRcounts$counts, breaks = 100, main = "Histogram of Cells Per CR", xlab = "")
+summary(juntti_OE_neuronal_CRcounts$counts)
+
+```
+
+Most CRs have a mean of ~48 neuronal cells which express them.
+
+
+
+# What are the most represented ORs we have?
+
+```{r}
+#write.xlsx(juntti_OE_neuronal_CRcounts[order(juntti_OE_neuronal_CRcounts$counts, decreasing = TRUE), c("LOC", "counts")], file = "../excel/cellcounts_per_CR.xlsx")
+ordered <- juntti_OE_neuronal_CRcounts[order(juntti_OE_neuronal_CRcounts$counts, decreasing = TRUE), c("LOC", "counts")]
+
+kable(ordered[ordered$LOC %in% V1R_genes$LOC,], caption = "V1R Genes")
+kable(ordered[ordered$LOC %in% V2R_genes$Symbol,], caption = "V2R Genes")
+kable(ordered[ordered$LOC %in% OR_genes$Symbol,], caption = "OR Genes")
+kable(ordered[ordered$LOC %in% TAAR_genes$Symbol,], caption = "TAAR Genes")
+```
+
+
+
+
+# Get average expression for each CR type
+
+sum (or average) expression of each OR type, then plot on UMAP <br>
+
+```{r}
+features <- list("V1R_genes" = V1R_genes$LOC, "V2R_genes" = V2R_genes$Symbol, "OR_genes" = OR_genes$Symbol, "TAAR_genes" = TAAR_genes$Symbol)
+juntti_OE_new <- genes_avg_expression(seur_obj = juntti_OE_new, features = features, slot = "data")
+juntti_OE_neuronal2 <- subset(x = juntti_OE_new, idents = c(0,1))
+
+FeaturePlot(juntti_OE_neuronal2, features = "V1R_genes_Sums")
+FeaturePlot(juntti_OE_neuronal2, features = "V2R_genes_Sums")
+FeaturePlot(juntti_OE_neuronal2, features = "OR_genes_Sums")
+FeaturePlot(juntti_OE_neuronal2, features = "TAAR_genes_Sums")
+
+FeaturePlot(juntti_OE_new, features = "V1R_genes_Sums")
+FeaturePlot(juntti_OE_new, features = "V2R_genes_Sums")
+FeaturePlot(juntti_OE_new, features = "OR_genes_Sums")
+FeaturePlot(juntti_OE_new, features = "TAAR_genes_Sums")
+```
+
+
+
+
+# Email Requests 4/5/2022
+
+we’d like to analyze our snRNA-seq data with this in mind. Here’s what we see as next task:
+For each OR and VR subtype, compare fosab expression in cluster 0/3 cells to expression in 1/2 cells. 
+Is any sensory neuron subtype preferentially activated by the pheromone? Here I think the test would be: Fraction of the OSN subtype fosab+ in cluster 0/3 cells vs in 1/2 cells.
+
+<br>
+
+There are two ways to go about this question. The first is to look at DE of fosab between pheromone_exposed vs control cells for each sensory neuron subtype. The second would be to do what was proposed in the email by dichotomizing fosab expression the "present"/"absent" and test whether % of cells in pheromone exposed which are fosab present = % of cells in control which are fosab present.
+
+<br>
+
+The second is simpler, so let's start there.
+<br>
+
+First some plots of cfos expression comparing pheromone exposed neuronal cells to control neuronal cells.
+```{r}
+juntti_OE_neuronal <- subset(x = juntti_OE_new, idents = c(0,1))
+
+juntti_OE_control <- subset(x = juntti_OE_neuronal, subset = fish_assignments == "control" & fosab > 0)
+juntti_OE_pheromone <- subset(x = juntti_OE_neuronal, subset = fish_assignments == "pheromone_exposed" & fosab > 0)
+
+FeaturePlot(juntti_OE_control, features = c("fosab")) + ggtitle("neuronal cell cfos expression in \nControl Fish")
+FeaturePlot(juntti_OE_pheromone, features = c("fosab")) + ggtitle("neuronal cell cfos expression in \nPheromone Exposed Fish")
+```
+
+
+First, subset to only include neuronal cells which express a single CR
+```{r}
+juntti_OE_neuronal_test <- subset(juntti_OE_neuronal, subset = OR_counts == 1)
+
+
+juntti_OE_neuronal_counts <- as.data.frame(GetAssayData(object = juntti_OE_neuronal, slot = "counts"))
+```
+
+
+Then, I will identify which CR is expressed in each cell and add this as metadata in the Seurat object
+
+```{r}
+#Add OR class per cell
+OR_counts <- juntti_OE_neuronal_counts[features$OR_genes, ]
+mat_nonzero <- as.data.frame(which(OR_counts != 0, arr.ind = T))   # Identify non-zero values
+mat_nonzero$Cell <- colnames(OR_counts)[unname(mat_nonzero[,2])]
+mat_nonzero$OR <- gsub("\\..*","",rownames(mat_nonzero))
+ORs <- mat_nonzero$OR
+names(ORs) <- mat_nonzero$Cell
+juntti_OE_neuronal <- AddMetaData(object = juntti_OE_neuronal, metadata = ORs, col.name = "OR_type")
+
+#Add V1R_genes class per cell
+V1R_genes_counts <- juntti_OE_neuronal_counts[features$V1R_genes, ]
+mat_nonzero <- as.data.frame(which(V1R_genes_counts != 0, arr.ind = T))   # Identify non-zero values
+mat_nonzero$Cell <- colnames(V1R_genes_counts)[unname(mat_nonzero[,2])]
+mat_nonzero$V1R <- gsub("\\..*","",rownames(mat_nonzero))
+V1Rs <- mat_nonzero$V1R
+names(V1Rs) <- mat_nonzero$Cell
+juntti_OE_neuronal <- AddMetaData(object = juntti_OE_neuronal, metadata = V1Rs, col.name = "V1R_type")
+
+
+#Add V2R_genes class per cell
+V2R_genes_counts <- juntti_OE_neuronal_counts[features$V2R_genes, ]
+mat_nonzero <- as.data.frame(which(V2R_genes_counts != 0, arr.ind = T))   # Identify non-zero values
+mat_nonzero$Cell <- colnames(V2R_genes_counts)[unname(mat_nonzero[,2])]
+mat_nonzero$V2R <- gsub("\\..*","",rownames(mat_nonzero))
+V2Rs <- mat_nonzero$V2R
+names(V2Rs) <- mat_nonzero$Cell
+juntti_OE_neuronal <- AddMetaData(object = juntti_OE_neuronal, metadata = V2Rs, col.name = "V2R_type")
+
+#Add TAAR_genes class per cell
+TAAR_genes_counts <- juntti_OE_neuronal_counts[features$TAAR_genes, ]
+mat_nonzero <- as.data.frame(which(TAAR_genes_counts != 0, arr.ind = T))   # Identify non-zero values
+mat_nonzero$Cell <- colnames(TAAR_genes_counts)[unname(mat_nonzero[,2])]
+mat_nonzero$TAAR <- gsub("\\..*","",rownames(mat_nonzero))
+TAARs <- mat_nonzero$TAAR
+names(TAARs) <- mat_nonzero$Cell
+juntti_OE_neuronal <- AddMetaData(object = juntti_OE_neuronal, metadata = TAARs, col.name = "TAAR_type")
+```
+
+
+To help us narrow this down out of the > 100 CR types, let's look at the cells which express fosab to see if there are any CR types which are highly represented in them.
+
+```{r}
+juntti_cfos <- subset(x = juntti_OE_neuronal, subset = fosab > 0)
+table(juntti_cfos$OR_type)
+table(juntti_cfos$V1R_type)
+table(juntti_cfos$V2R_type)
+table(juntti_cfos$TAAR_type)
+```
+
+
+It looks like the V2R receptor "LOC102296764" is the one which is most highly represented in cfos expressing cells, and really the only receptor we could do any real statistics with regarding cfos. Let's see if cfos is DE between pheromone/control in cells of this receptor type.
+
+```{r}
+juntti_LOC102296764 <- subset(juntti_OE_neuronal, subset = V2R_type == "LOC102296764")
+Idents(juntti_LOC102296764) <- juntti_LOC102296764$fish_assignments
+DE <- FindMarkers(juntti_LOC102296764, ident.1 = "pheromone_exposed", ident.2 = "control")
+DE %>%
+  filter(p_val_adj < .05)
+```
+We get a handful of genes that comes up as DE between pheromone exposed and control in this V2R type, 
+
+LOC102291352    Gene description: deoxynucleoside triphosphate triphosphohydrolase SAMHD1 <br>
+LOC121813958    Gene description: deoxynucleoside triphosphate triphosphohydrolase SAMHD1-like <br>
+LOC106632613    Gene description: ribonuclease inhibitor-like <br>
+LOC121813960    Gene description: zinc finger MYM-type protein 1-like <br>
+LOC121813956    Gene description: deoxynucleoside triphosphate triphosphohydrolase SAMHD1-like <br>
+LOC121813294    Gene description: uncharacterized LOC121813294 <br>
+
+<br>
+This seems potentially interesting that we get hits for a particular CR type that exhibits transcriptional differences in a handful of genes, but notably we don't see cfos in this list of genes. 
+
+<br>
+
+This leads us to option 2. and that is to compare the number of cfos+ cells to cfos- cells to compare two proportions. We should use a two proportion z-test for this comparison.
+
+```{r}
+juntti_LOC102296764_pe <- subset(juntti_LOC102296764, subset = fish_assignments == "pheromone_exposed")
+juntti_LOC102296764_ctl <- subset(juntti_LOC102296764, subset = fish_assignments == "control")
+
+LOC102296764_pe_fosab <- GetAssayData(juntti_LOC102296764_pe, slot = "counts")
+LOC102296764_pe_fosab <- LOC102296764_pe_fosab["fosab", ]
+
+LOC102296764_ctl_fosab <- GetAssayData(juntti_LOC102296764_ctl, slot = "counts")
+LOC102296764_ctl_fosab <- LOC102296764_ctl_fosab["fosab", ]
+
+fosab <- data.frame(row.names = c("fosab", "nofosab", "fosab_prop"), 
+           "pheromone_exposed" = c(length(which(LOC102296764_pe_fosab != 0, arr.ind = T)),
+                                   length(which(LOC102296764_pe_fosab == 0, arr.ind = T)),
+                                   length(which(LOC102296764_pe_fosab != 0, arr.ind = T))/length(LOC102296764_pe_fosab)),
+           "control" = c(length(which(LOC102296764_ctl_fosab != 0, arr.ind = T)),
+                                   length(which(LOC102296764_ctl_fosab == 0, arr.ind = T)),
+                         length(which(LOC102296764_ctl_fosab != 0, arr.ind = T))/length(LOC102296764_ctl_fosab)))
+fosab
+```
+
+Just eyeballing, it looks like we should expect this difference to not be significant.
+<br>
+
+```{r}
+res <- prop.test(x = c(12, 11), n = c(192, 244))
+# Printing the results
+res 
+```
+This is indeed the case, we fail to reject the null hypothesis that: 
+the proportion of pheromone_exposed fosab+ cells = the proportion of control fosab+ cells
+
+# Save Seurat Object
+
+```{r, echo = FALSE}
+juntti_OE_new <- subset(juntti_OE_new, features = all.genes[all.genes != "LOC102296764"])
+```
+
+
+```{r}
+save(juntti_OE_new, file = "seurat_juntti_v4202022.rda")
+```
+
+
